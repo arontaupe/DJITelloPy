@@ -12,8 +12,21 @@ from typing import Optional, Union, Type, Dict
 
 from .enforce_types import enforce_types
 
-import av
-import numpy as np
+# Optional video decoding dependency: PyAV (FFmpeg bindings).
+# PyAV may not be available in lightweight environments (Carnets/iPad, minimal venvs).
+# Wrap the import so the package can still be imported when video support is missing.
+try:
+    import av
+    HAVE_AV = True
+except Exception:
+    av = None
+    HAVE_AV = False
+
+# Numpy is commonly available but not strictly required for non-video usage.
+try:
+    import numpy as np
+except Exception:
+    np = None
 
 
 threads_initialized = False
@@ -1095,7 +1108,7 @@ class BackgroundFrameRead:
                     break
         except av.error.ExitError:
             raise TelloException('Do not have enough frames for decoding, please try again or increase video fps before get_frame_read()')
-    
+
     def get_queued_frame(self):
         """
         Get a frame from the queue
