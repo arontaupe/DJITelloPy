@@ -105,10 +105,6 @@ class Tello:
     state_field_converters = {key : int for key in INT_STATE_FIELDS}
     state_field_converters.update({key : float for key in FLOAT_STATE_FIELDS})
 
-    # VideoCapture object
-    background_frame_read: Optional['BackgroundFrameRead'] = None
-
-    stream_on = False
     is_flying = False
 
     def __init__(self,
@@ -144,13 +140,6 @@ class Tello:
         self.LOGGER.info("Tello instance was initialized. Host: '{}'. Port: '{}'.".format(host, Tello.CONTROL_UDP_PORT))
 
         self.vs_udp_port = vs_udp
-
-
-    def change_vs_udp(self, udp_port):
-        """Change the UDP Port for sending video feed from the drone.
-        """
-        self.vs_udp_port = udp_port
-        self.send_control_command(f'port 8890 {self.vs_udp_port}')
 
     def get_own_udp_object(self):
         """Get own object from the global drones dict. This object is filled
@@ -428,25 +417,6 @@ class Tello:
         """
         return self.get_state_field('bat')
 
-    def get_udp_video_address(self) -> str:
-        """Internal method, you normally wouldn't call this youself.
-        """
-        address_schema = 'udp://@{ip}:{port}'  # + '?overrun_nonfatal=1&fifo_size=5000'
-        address = address_schema.format(ip=self.VS_UDP_IP, port=self.vs_udp_port)
-        return address
-
-    def get_frame_read(self, with_queue = False, max_queue_len = 32) -> 'BackgroundFrameRead':
-        """Get the BackgroundFrameRead object from the camera drone. Then, you just need to call
-        backgroundFrameRead.frame to get the actual frame received by the drone.
-        Returns:
-            BackgroundFrameRead
-        """
-        if self.background_frame_read is None:
-            address = self.get_udp_video_address()
-            self.background_frame_read = BackgroundFrameRead(self, address, with_queue, max_queue_len)
-            self.background_frame_read.start()
-        return self.background_frame_read
-
     def send_command_with_return(self, command: str, timeout: int = RESPONSE_TIMEOUT) -> str:
         """Send command to Tello and wait for its response.
         Internal method, you normally wouldn't call this yourself.
@@ -605,32 +575,6 @@ class Tello:
         """
         self.send_control_command("land")
         self.is_flying = False
-
-    def streamon(self):
-        """Turn on video streaming. Use `tello.get_frame_read` afterwards.
-        Video Streaming is supported on all tellos when in AP mode (i.e.
-        when your computer is connected to Tello-XXXXXX WiFi ntwork).
-        Tello EDUs support video streaming while connected to a
-        WiFi-network via SDK 3.
-
-        !!! Note:
-            If the response is 'Unknown command' you have to update the Tello
-            firmware. This can be done using the official Tello app.
-        """
-        if self.DEFAULT_VS_UDP_PORT != self.vs_udp_port:
-            self.change_vs_udp(self.vs_udp_port)
-        self.send_control_command("streamon")
-        self.stream_on = True
-
-    def streamoff(self):
-        """Turn off video streaming.
-        """
-        self.send_control_command("streamoff")
-        self.stream_on = False
-
-        if self.background_frame_read is not None:
-            self.background_frame_read.stop()
-            self.background_frame_read = None
 
     def emergency(self):
         """Stop all motors immediately.
@@ -893,49 +837,6 @@ class Tello:
         """
         self.send_command_without_return('reboot')
 
-    def set_video_bitrate(self, bitrate: int):
-        """Sets the bitrate of the video stream
-        Use one of the following for the bitrate argument:
-            Tello.BITRATE_AUTO
-            Tello.BITRATE_1MBPS
-            Tello.BITRATE_2MBPS
-            Tello.BITRATE_3MBPS
-            Tello.BITRATE_4MBPS
-            Tello.BITRATE_5MBPS
-        """
-        cmd = 'setbitrate {}'.format(bitrate)
-        self.send_control_command(cmd)
-
-    def set_video_resolution(self, resolution: str):
-        """Sets the resolution of the video stream
-        Use one of the following for the resolution argument:
-            Tello.RESOLUTION_480P
-            Tello.RESOLUTION_720P
-        """
-        cmd = 'setresolution {}'.format(resolution)
-        self.send_control_command(cmd)
-
-    def set_video_fps(self, fps: str):
-        """Sets the frames per second of the video stream
-        Use one of the following for the fps argument:
-            Tello.FPS_5
-            Tello.FPS_15
-            Tello.FPS_30
-        """
-        cmd = 'setfps {}'.format(fps)
-        self.send_control_command(cmd)
-
-    def set_video_direction(self, direction: int):
-        """Selects one of the two cameras for video streaming
-        The forward camera is the regular 1080x720 color camera
-        The downward camera is a grey-only 320x240 IR-sensitive camera
-        Use one of the following for the direction argument:
-            Tello.CAMERA_FORWARD
-            Tello.CAMERA_DOWNWARD
-        """
-        cmd = 'downvision {}'.format(direction)
-        self.send_control_command(cmd)
-
     def send_expansion_command(self, expansion_cmd: str):
         """Sends a command to the ESP32 expansion board connected to a Tello Talent
         Use e.g. tello.send_expansion_command("led 255 0 0") to turn the top led red.
@@ -1044,14 +945,8 @@ class Tello:
         try:
             if self.is_flying:
                 self.land()
-            if self.stream_on:
-                self.streamoff()
         except TelloException:
             pass
-
-        if self.background_frame_read is not None:
-            self.background_frame_read.stop()
-            self.background_frame_read = None
 
         host = self.address[0]
         if host in drones:
@@ -1059,84 +954,3 @@ class Tello:
 
     def __del__(self):
         self.end()
-
-
-class BackgroundFrameRead:
-    """
-    This class read frames using PyAV in background. Use
-    backgroundFrameRead.frame to get the current frame.
-    """
-
-    def __init__(self, tello, address, with_queue = False, maxsize = 32):
-        self.address = address
-        self.lock = Lock()
-        self.frame = np.zeros([300, 400, 3], dtype=np.uint8)
-        self.frames = deque([], maxsize)
-        self.with_queue = with_queue
-
-        # Try grabbing frame with PyAV
-        # According to issue #90 the decoder might need some time
-        # https://github.com/damiafuentes/DJITelloPy/issues/90#issuecomment-855458905
-        try:
-            Tello.LOGGER.debug('trying to grab video frames...')
-            self.container = av.open(self.address, timeout=(Tello.FRAME_GRAB_TIMEOUT, None))
-        except av.error.ExitError:
-            raise TelloException('Failed to grab video frames from video stream')
-
-        self.stopped = False
-        self.worker = Thread(target=self.update_frame, args=(), daemon=True)
-
-    def start(self):
-        """Start the frame update worker
-        Internal method, you normally wouldn't call this yourself.
-        """
-        self.worker.start()
-
-    def update_frame(self):
-        """Thread worker function to retrieve frames using PyAV
-        Internal method, you normally wouldn't call this yourself.
-        """
-        try:
-            for frame in self.container.decode(video=0):
-                if self.with_queue:
-                    self.frames.append(np.array(frame.to_image()))
-                else:
-                    self.frame = np.array(frame.to_image())
-
-                if self.stopped:
-                    self.container.close()
-                    break
-        except av.error.ExitError:
-            raise TelloException('Do not have enough frames for decoding, please try again or increase video fps before get_frame_read()')
-
-    def get_queued_frame(self):
-        """
-        Get a frame from the queue
-        """
-        with self.lock:
-            try:
-                return self.frames.popleft()
-            except IndexError:
-                return None
-
-    @property
-    def frame(self):
-        """
-        Access the frame variable directly
-        """
-        if self.with_queue:
-            return self.get_queued_frame()
-
-        with self.lock:
-            return self._frame
-
-    @frame.setter
-    def frame(self, value):
-        with self.lock:
-            self._frame = value
-
-    def stop(self):
-        """Stop the frame update worker
-        Internal method, you normally wouldn't call this yourself.
-        """
-        self.stopped = True
